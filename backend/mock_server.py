@@ -1,8 +1,15 @@
 """
 Battery Test Bench - Mock Backend Server (UI/UX Testing Only)
-Version: 1.4.2
+Version: 2.0.0
 
 Changelog:
+v2.0.0 (2026-02-22): Added procedures API (tech_pub_sections, procedure_steps CRUD,
+                      procedure resolution); job_tasks API (unified task model replacing
+                      work_job_tasks + manual_test_results, manual result submission,
+                      task skipping, awaiting-input queries); start-job endpoint with
+                      full procedure resolution and job_tasks creation; task_awaiting_input
+                      WebSocket events; test_reports-based report endpoint; station
+                      current_task_label in broadcasts; tool validation endpoints
 v1.4.2 (2026-02-20): Added StaticFiles mount for serving frontend build in production;
                       updated entry point to detect and report frontend availability
 v1.4.1 (2026-02-18): Reworked PSU & DC Load verification procedures — 20 test points each
@@ -337,6 +344,7 @@ def _make_station(station_id: int) -> dict:
         "work_order_item_id": station_id * 10 if state in ("running", "complete") else None,
         "work_job_id": work_job_id,
         "test_phase": phase,
+        "current_task_label": f"Task in progress" if state == "running" else None,
         "elapsed_time_s": random.randint(60, 36000) if state == "running" else None,
         "battery_config": model,
     }
@@ -605,7 +613,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="Battery Test Bench Mock Server", version="1.4.1", lifespan=lifespan)
+app = FastAPI(title="Battery Test Bench Mock Server", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -615,24 +623,38 @@ app.add_middleware(
 )
 
 
+async def _broadcast_to_clients(message: dict):
+    """Send a JSON message to all connected WebSocket clients"""
+    data = json.dumps(message)
+    disconnected = []
+    for ws in _ws_clients:
+        try:
+            await ws.send_text(data)
+        except Exception:
+            disconnected.append(ws)
+    for ws in disconnected:
+        _ws_clients.remove(ws)
+
+
+async def _broadcast_task_awaiting_input(station_id: int, task_data: dict):
+    """Broadcast task_awaiting_input event to all WebSocket clients"""
+    await _broadcast_to_clients({
+        "type": "task_awaiting_input",
+        "station_id": station_id,
+        "task": task_data,
+    })
+
+
 async def _broadcast_loop():
     """Broadcast station updates every second"""
     while True:
         _update_stations()
         # Filter out internal simulation state (keys starting with _)
         broadcast = [{k: v for k, v in s.items() if not k.startswith('_')} for s in _stations.values()]
-        data = json.dumps({
+        await _broadcast_to_clients({
             "type": "update",
-            "data": broadcast
+            "data": broadcast,
         })
-        disconnected = []
-        for ws in _ws_clients:
-            try:
-                await ws.send_text(data)
-            except Exception:
-                disconnected.append(ws)
-        for ws in disconnected:
-            _ws_clients.remove(ws)
         await asyncio.sleep(1.0)
 
 
@@ -1225,6 +1247,272 @@ async def delete_tech_pub(tech_pub_id: int):
         return {"status": "ok"}
 
 
+# -- Tech Pub Applicability --
+
+@app.get("/api/tech-pub-applicability/{tech_pub_id}")
+async def get_tech_pub_applicability(tech_pub_id: int):
+    async with get_db() as db:
+        return await execute_all(db,
+            "SELECT * FROM tech_pub_applicability WHERE tech_pub_id = ?", (tech_pub_id,))
+
+
+@app.post("/api/tech-pub-applicability")
+async def create_tech_pub_applicability(data: dict):
+    async with get_db() as db:
+        new_id = await execute_insert(db,
+            """INSERT INTO tech_pub_applicability
+                (tech_pub_id, part_number, amendment, effective_date, notes)
+            VALUES (?, ?, ?, ?, ?)""",
+            (data.get("tech_pub_id"), data.get("part_number"),
+             data.get("amendment", ""), data.get("effective_date"),
+             data.get("notes")))
+        return await execute_one(db, "SELECT * FROM tech_pub_applicability WHERE id = ?", (new_id,))
+
+
+# -- Procedures (Tech Pub Sections & Steps) --
+
+@app.get("/api/procedures/sections/{tech_pub_id}")
+async def get_procedure_sections(tech_pub_id: int):
+    """Get all sections for a tech pub, ordered by sort_order."""
+    async with get_db() as db:
+        return await execute_all(db,
+            """SELECT * FROM tech_pub_sections
+               WHERE tech_pub_id = ? AND is_active = 1
+               ORDER BY sort_order ASC""", (tech_pub_id,))
+
+
+@app.post("/api/procedures/sections")
+async def create_procedure_section(data: dict):
+    """Create a new tech pub section."""
+    async with get_db() as db:
+        new_id = await execute_insert(db,
+            """INSERT INTO tech_pub_sections
+                (tech_pub_id, section_number, title, section_type,
+                 description, sort_order, is_mandatory,
+                 condition_type, condition_key, condition_value)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (data.get("tech_pub_id"), data.get("section_number"),
+             data.get("title"), data.get("section_type"),
+             data.get("description"), data.get("sort_order", 0),
+             data.get("is_mandatory", True), data.get("condition_type", "always"),
+             data.get("condition_key"), data.get("condition_value")))
+        return {"id": new_id, "message": "Section created"}
+
+
+@app.put("/api/procedures/sections/{section_id}")
+async def update_procedure_section(section_id: int, data: dict):
+    """Update a tech pub section."""
+    async with get_db() as db:
+        existing = await execute_one(db, "SELECT * FROM tech_pub_sections WHERE id = ?", (section_id,))
+        if not existing:
+            raise HTTPException(404, "Section not found")
+        fields = {k: v for k, v in data.items() if k != "id"}
+        if fields:
+            set_clause = ", ".join(f"{k} = ?" for k in fields)
+            await execute_update(db,
+                f"UPDATE tech_pub_sections SET {set_clause} WHERE id = ?",
+                (*fields.values(), section_id))
+        return await execute_one(db, "SELECT * FROM tech_pub_sections WHERE id = ?", (section_id,))
+
+
+@app.get("/api/procedures/steps/{section_id}")
+async def get_procedure_steps(section_id: int):
+    """Get all steps for a section, ordered by sort_order."""
+    async with get_db() as db:
+        rows = await execute_all(db,
+            """SELECT * FROM procedure_steps
+               WHERE section_id = ? AND is_active = 1
+               ORDER BY sort_order ASC""", (section_id,))
+        for r in rows:
+            r["param_overrides"] = from_json(r.get("param_overrides")) or {}
+            r["requires_tools"] = from_json(r.get("requires_tools")) or []
+        return rows
+
+
+@app.post("/api/procedures/steps")
+async def create_procedure_step(data: dict):
+    """Create a new procedure step."""
+    async with get_db() as db:
+        new_id = await execute_insert(db,
+            """INSERT INTO procedure_steps
+                (section_id, step_number, step_type, label, description,
+                 param_source, param_overrides, pass_criteria_type,
+                 pass_criteria_value, measurement_key, measurement_unit,
+                 measurement_label, estimated_duration_min, is_automated,
+                 requires_tools, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (data.get("section_id"), data.get("step_number"),
+             data.get("step_type"), data.get("label"),
+             data.get("description"), data.get("param_source", "fixed"),
+             json_col(data.get("param_overrides", {})),
+             data.get("pass_criteria_type"), data.get("pass_criteria_value"),
+             data.get("measurement_key"), data.get("measurement_unit"),
+             data.get("measurement_label"), data.get("estimated_duration_min", 0),
+             data.get("is_automated", False),
+             json_col(data.get("requires_tools", [])),
+             data.get("sort_order", 0)))
+        return {"id": new_id, "message": "Step created"}
+
+
+@app.put("/api/procedures/steps/{step_id}")
+async def update_procedure_step(step_id: int, data: dict):
+    """Update a procedure step."""
+    async with get_db() as db:
+        existing = await execute_one(db, "SELECT * FROM procedure_steps WHERE id = ?", (step_id,))
+        if not existing:
+            raise HTTPException(404, "Step not found")
+        fields = {k: v for k, v in data.items() if k != "id"}
+        if "param_overrides" in fields:
+            fields["param_overrides"] = json_col(fields["param_overrides"])
+        if "requires_tools" in fields:
+            fields["requires_tools"] = json_col(fields["requires_tools"])
+        if fields:
+            set_clause = ", ".join(f"{k} = ?" for k in fields)
+            await execute_update(db,
+                f"UPDATE procedure_steps SET {set_clause} WHERE id = ?",
+                (*fields.values(), step_id))
+        row = await execute_one(db, "SELECT * FROM procedure_steps WHERE id = ?", (step_id,))
+        row["param_overrides"] = from_json(row.get("param_overrides")) or {}
+        row["requires_tools"] = from_json(row.get("requires_tools")) or []
+        return row
+
+
+@app.get("/api/procedures/resolve/{work_order_item_id}")
+async def resolve_procedure(
+    work_order_item_id: int,
+    service_type: str = "capacity_test",
+    months_since_service: int = 0,
+):
+    """
+    Resolve the complete procedure for a work order item.
+    Returns applicable sections and steps based on battery model, feature flags,
+    amendment, age, and service type. Mock version of ProcedureResolver.
+    """
+    async with get_db() as db:
+        # Look up work order item
+        item = await execute_one(db,
+            "SELECT * FROM work_order_items WHERE id = ?", (work_order_item_id,))
+        if not item:
+            raise HTTPException(404, "Work order item not found")
+
+        part_number = item.get("part_number", "")
+        amendment = item.get("amendment", "")
+
+        # Find tech pub via tech_pub_applicability (new) or JSON column (legacy)
+        tech_pub = None
+        applicability = await execute_one(db,
+            """SELECT ta.*, tp.cmm_number, tp.title, tp.revision
+               FROM tech_pub_applicability ta
+               JOIN tech_pubs tp ON ta.tech_pub_id = tp.id
+               WHERE ta.part_number = ?
+               ORDER BY ta.id LIMIT 1""", (part_number,))
+        if applicability:
+            tech_pub = await execute_one(db,
+                "SELECT * FROM tech_pubs WHERE id = ?", (applicability["tech_pub_id"],))
+        else:
+            tech_pub = await execute_one(db,
+                "SELECT * FROM tech_pubs WHERE applicable_part_numbers LIKE ?",
+                (f'%"{part_number}"%',))
+
+        if not tech_pub:
+            raise HTTPException(404, f"No tech pub found for P/N {part_number}")
+
+        tech_pub_id = tech_pub["id"]
+
+        # Get battery profile for feature flags
+        profile = await execute_one(db,
+            "SELECT * FROM battery_profiles WHERE part_number = ? LIMIT 1", (part_number,))
+        feature_flags = from_json(profile.get("feature_flags", "{}")) if profile else {}
+
+        # Get all active sections
+        sections = await execute_all(db,
+            """SELECT * FROM tech_pub_sections
+               WHERE tech_pub_id = ? AND is_active = 1
+               ORDER BY sort_order ASC""", (tech_pub_id,))
+
+        # Filter by conditions
+        resolved_sections = []
+        total_steps = 0
+        total_duration = 0.0
+
+        for sec in sections:
+            cond = sec.get("condition_type", "always")
+            ckey = sec.get("condition_key", "")
+            cval = sec.get("condition_value", "")
+
+            applies = True
+            if cond == "feature_flag" and ckey:
+                applies = str(feature_flags.get(ckey, False)).lower() == str(cval).lower()
+            elif cond == "amendment_match" and ckey:
+                applies = amendment == cval
+            elif cond == "age_threshold" and ckey:
+                try:
+                    threshold = int(cval) if cval else 0
+                    applies = months_since_service >= threshold
+                except ValueError:
+                    applies = False
+            elif cond == "service_type" and ckey:
+                applies = service_type == cval
+
+            if not applies:
+                continue
+
+            # Get steps for this section
+            steps = await execute_all(db,
+                """SELECT * FROM procedure_steps
+                   WHERE section_id = ? AND is_active = 1
+                   ORDER BY sort_order ASC""", (sec["id"],))
+
+            # Filter step conditions too
+            resolved_steps = []
+            for st in steps:
+                st_cond = st.get("condition_type", "always")
+                st_applies = True
+                if st_cond == "feature_flag":
+                    st_applies = str(feature_flags.get(st.get("condition_key", ""), False)).lower() == str(st.get("condition_value", "")).lower()
+                if st_applies:
+                    resolved_steps.append({
+                        "step_id": st["id"],
+                        "step_number": st["step_number"],
+                        "step_type": st["step_type"],
+                        "label": st["label"],
+                        "description": st.get("description"),
+                        "is_automated": bool(st.get("is_automated")),
+                        "estimated_duration_min": st.get("estimated_duration_min", 0),
+                        "requires_tools": from_json(st.get("requires_tools")) or [],
+                        "param_source": st.get("param_source", "fixed"),
+                        "pass_criteria_type": st.get("pass_criteria_type"),
+                        "pass_criteria_value": st.get("pass_criteria_value"),
+                        "measurement_key": st.get("measurement_key"),
+                        "measurement_unit": st.get("measurement_unit"),
+                    })
+
+            total_steps += len(resolved_steps)
+            total_duration += sum(s.get("estimated_duration_min", 0) for s in resolved_steps)
+
+            resolved_sections.append({
+                "section_id": sec["id"],
+                "section_number": sec["section_number"],
+                "title": sec["title"],
+                "section_type": sec["section_type"],
+                "is_mandatory": bool(sec.get("is_mandatory", True)),
+                "steps": resolved_steps,
+            })
+
+        return {
+            "tech_pub_id": tech_pub_id,
+            "cmm_number": tech_pub.get("cmm_number"),
+            "cmm_revision": tech_pub.get("revision"),
+            "cmm_title": tech_pub.get("title"),
+            "part_number": part_number,
+            "amendment": amendment,
+            "service_type": service_type,
+            "total_steps": total_steps,
+            "estimated_hours": round(total_duration / 60.0, 1),
+            "sections": resolved_sections,
+        }
+
+
 # -- Recipes (Reworked - linked to Tech Pubs) --
 
 @app.get("/api/recipes")
@@ -1690,6 +1978,340 @@ async def delete_task(job_id: int, task_id: int, admin: bool = False):
         return {"status": "ok"}
 
 
+# -- Job Tasks (v2.0 — unified task model) --
+
+@app.get("/api/job-tasks/job/{work_job_id}")
+async def get_job_tasks(work_job_id: int):
+    """Get all tasks for a work job (new unified model)."""
+    async with get_db() as db:
+        rows = await execute_all(db,
+            """SELECT jt.*, ps.measurement_key, ps.measurement_unit,
+                      ps.pass_criteria_type, ps.pass_criteria_value
+               FROM job_tasks jt
+               LEFT JOIN procedure_steps ps ON jt.step_id = ps.id
+               WHERE jt.work_job_id = ?
+               ORDER BY jt.task_number ASC""", (work_job_id,))
+        for r in rows:
+            r["params"] = from_json(r.get("params")) or {}
+            r["measured_values"] = from_json(r.get("measured_values")) or {}
+            r["chart_data"] = from_json(r.get("chart_data")) or []
+        return rows
+
+
+@app.get("/api/job-tasks/awaiting-input/{station_id}")
+async def get_awaiting_tasks(station_id: int):
+    """Get tasks awaiting manual input for a station."""
+    async with get_db() as db:
+        rows = await execute_all(db,
+            """SELECT jt.* FROM job_tasks jt
+               JOIN work_jobs wj ON jt.work_job_id = wj.id
+               WHERE wj.station_id = ? AND jt.status = 'awaiting_input'
+               ORDER BY jt.task_number ASC""", (station_id,))
+        for r in rows:
+            r["params"] = from_json(r.get("params")) or {}
+            r["measured_values"] = from_json(r.get("measured_values")) or {}
+        return rows
+
+
+@app.get("/api/job-tasks/tools/available")
+async def get_available_tools_for_tasks(category: Optional[str] = None):
+    """Get available calibrated tools, optionally filtered by category."""
+    async with get_db() as db:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if category:
+            return await execute_all(db,
+                """SELECT * FROM tools
+                   WHERE is_active = 1 AND valid_until >= ? AND category = ?""",
+                (today, category))
+        return await execute_all(db,
+            "SELECT * FROM tools WHERE is_active = 1 AND valid_until >= ?", (today,))
+
+
+@app.get("/api/job-tasks/{task_id}")
+async def get_job_task(task_id: int):
+    """Get a single task with full details."""
+    async with get_db() as db:
+        row = await execute_one(db, "SELECT * FROM job_tasks WHERE id = ?", (task_id,))
+        if not row:
+            raise HTTPException(404, "Task not found")
+        row["params"] = from_json(row.get("params")) or {}
+        row["measured_values"] = from_json(row.get("measured_values")) or {}
+        row["chart_data"] = from_json(row.get("chart_data")) or []
+
+        # Get tool usage for this task
+        tools = await execute_all(db,
+            "SELECT * FROM task_tool_usage WHERE job_task_id = ?", (task_id,))
+        row["tools_used"] = tools
+        return row
+
+
+@app.post("/api/job-tasks/{task_id}/submit")
+async def submit_manual_result(task_id: int, data: dict):
+    """Submit manual task results from PWA form."""
+    async with get_db() as db:
+        task = await execute_one(db, "SELECT * FROM job_tasks WHERE id = ?", (task_id,))
+        if not task:
+            raise HTTPException(404, "Task not found")
+
+        # Validate and record tool usage
+        tool_ids = data.get("tool_ids", [])
+        for tool_id in tool_ids:
+            tool = await execute_one(db, "SELECT * FROM tools WHERE id = ?", (tool_id,))
+            if not tool:
+                raise HTTPException(400, f"Tool {tool_id} not found")
+            today = datetime.now().strftime("%Y-%m-%d")
+            is_valid = tool.get("valid_until", "") >= today
+            if not is_valid:
+                raise HTTPException(400,
+                    f"Tool {tool.get('description', tool_id)} calibration expired")
+            await execute_insert(db,
+                """INSERT INTO task_tool_usage
+                    (job_task_id, tool_id, tool_id_display, tool_description,
+                     tool_serial_number, tool_calibration_valid,
+                     tool_calibration_due, tool_calibration_cert)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (task_id, tool_id,
+                 tool.get("tool_id_display", f"TID{tool_id:03d}"),
+                 tool.get("description", ""),
+                 tool.get("serial_number", ""),
+                 is_valid, tool.get("valid_until"),
+                 tool.get("calibration_certificate")))
+
+        # Update task with results
+        await execute_update(db,
+            """UPDATE job_tasks SET
+                status = 'completed',
+                step_result = ?,
+                measured_values = ?,
+                result_notes = ?,
+                performed_by = ?,
+                end_time = datetime('now')
+            WHERE id = ?""",
+            (data.get("step_result", "pass"),
+             json_col(data.get("measured_values", {})),
+             data.get("result_notes", ""),
+             data.get("performed_by", ""),
+             task_id))
+
+        # Check if all tasks for this job are complete
+        job_id = task["work_job_id"]
+        pending = await execute_one(db,
+            """SELECT COUNT(*) as cnt FROM job_tasks
+               WHERE work_job_id = ? AND status NOT IN ('completed', 'skipped')""",
+            (job_id,))
+        if pending and pending["cnt"] == 0:
+            # All tasks complete — determine overall result
+            failed = await execute_one(db,
+                """SELECT COUNT(*) as cnt FROM job_tasks
+                   WHERE work_job_id = ? AND step_result = 'fail'""", (job_id,))
+            overall = "fail" if (failed and failed["cnt"] > 0) else "pass"
+            await execute_update(db,
+                """UPDATE work_jobs SET status = 'completed',
+                   completed_at = datetime('now'), overall_result = ?
+                WHERE id = ?""", (overall, job_id))
+
+            # Update station state
+            job = await execute_one(db, "SELECT * FROM work_jobs WHERE id = ?", (job_id,))
+            if job and job["station_id"] in _stations:
+                sid = job["station_id"]
+                _stations[sid]["state"] = "complete"
+                _stations[sid]["test_phase"] = f"complete_{overall}"
+                _stations[sid]["current_task_label"] = None
+
+        return {"success": True, "message": f"Task {task_id} result submitted"}
+
+
+@app.post("/api/job-tasks/{task_id}/skip")
+async def skip_job_task(task_id: int, data: dict = None):
+    """Skip a manual task (mark as skipped)."""
+    reason = data.get("reason", "") if data else ""
+    async with get_db() as db:
+        await execute_update(db,
+            """UPDATE job_tasks SET status = 'skipped', step_result = 'skipped',
+                   result_notes = ?
+            WHERE id = ? AND status IN ('pending', 'awaiting_input')""",
+            (reason, task_id))
+    return {"success": True, "message": f"Task {task_id} skipped"}
+
+
+@app.post("/api/job-tasks/start-job")
+async def start_job(data: dict):
+    """
+    Start a new job with full procedure resolution.
+    Creates work_job, resolves procedure, creates job_tasks.
+    """
+    work_order_item_id = data.get("work_order_item_id")
+    station_id = data.get("station_id")
+    service_type = data.get("service_type", "capacity_test")
+    months_since_service = data.get("months_since_service", 0)
+    started_by = data.get("started_by", "")
+
+    if not station_id or station_id not in _stations:
+        raise HTTPException(400, "Invalid station ID")
+
+    async with get_db() as db:
+        # Get item details
+        item = await execute_one(db,
+            """SELECT woi.*, wo.work_order_number, wo.id as wo_id
+               FROM work_order_items woi
+               JOIN work_orders wo ON woi.work_order_id = wo.id
+               WHERE woi.id = ?""", (work_order_item_id,))
+        if not item:
+            raise HTTPException(404, "Work order item not found")
+
+        part_number = item.get("part_number", "")
+        amendment = item.get("amendment", "")
+
+        # Find tech pub
+        tech_pub = None
+        applicability = await execute_one(db,
+            """SELECT ta.tech_pub_id FROM tech_pub_applicability ta
+               WHERE ta.part_number = ? LIMIT 1""", (part_number,))
+        if applicability:
+            tech_pub = await execute_one(db,
+                "SELECT * FROM tech_pubs WHERE id = ?", (applicability["tech_pub_id"],))
+        else:
+            tech_pub = await execute_one(db,
+                "SELECT * FROM tech_pubs WHERE applicable_part_numbers LIKE ?",
+                (f'%"{part_number}"%',))
+
+        if not tech_pub:
+            raise HTTPException(400, f"No tech pub found for P/N {part_number}")
+
+        tech_pub_id = tech_pub["id"]
+
+        # Get profile for feature flags
+        profile = await execute_one(db,
+            "SELECT * FROM battery_profiles WHERE part_number = ? LIMIT 1", (part_number,))
+        feature_flags = from_json(profile.get("feature_flags", "{}")) if profile else {}
+        profile_id = profile["id"] if profile else None
+
+        # Create work_job
+        job_id = await execute_insert(db,
+            """INSERT INTO work_jobs
+                (work_order_id, work_order_item_id, work_order_number,
+                 battery_serial, battery_part_number, battery_amendment,
+                 tech_pub_id, tech_pub_cmm, tech_pub_revision,
+                 station_id, status, started_at, started_by,
+                 profile_id, procedure_snapshot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', datetime('now'),
+                    ?, ?, ?)""",
+            (item["wo_id"], work_order_item_id,
+             item["work_order_number"],
+             item.get("serial_number", ""), part_number, amendment,
+             tech_pub_id, tech_pub.get("cmm_number", ""),
+             tech_pub.get("revision", ""),
+             station_id, started_by, profile_id,
+             json_col({"cmm": tech_pub.get("cmm_number"), "resolved_at": datetime.now().isoformat()})))
+
+        # Resolve sections and steps, create job_tasks
+        sections = await execute_all(db,
+            """SELECT * FROM tech_pub_sections
+               WHERE tech_pub_id = ? AND is_active = 1
+               ORDER BY sort_order ASC""", (tech_pub_id,))
+
+        task_number = 0
+        task_ids = []
+
+        for sec in sections:
+            cond = sec.get("condition_type", "always")
+            ckey = sec.get("condition_key", "")
+            cval = sec.get("condition_value", "")
+            applies = True
+            if cond == "feature_flag" and ckey:
+                applies = str(feature_flags.get(ckey, False)).lower() == str(cval).lower()
+            elif cond == "age_threshold" and ckey:
+                try:
+                    threshold = int(cval) if cval else 0
+                    applies = months_since_service >= threshold
+                except ValueError:
+                    applies = False
+            elif cond == "service_type" and ckey:
+                applies = service_type == cval
+
+            if not applies:
+                continue
+
+            steps = await execute_all(db,
+                """SELECT * FROM procedure_steps
+                   WHERE section_id = ? AND is_active = 1
+                   ORDER BY sort_order ASC""", (sec["id"],))
+
+            for st in steps:
+                st_cond = st.get("condition_type", "always")
+                st_applies = True
+                if st_cond == "feature_flag":
+                    st_applies = str(feature_flags.get(st.get("condition_key", ""), False)).lower() == str(st.get("condition_value", "")).lower()
+                if not st_applies:
+                    continue
+
+                task_number += 1
+                is_automated = bool(st.get("is_automated"))
+                status = "pending" if is_automated else "pending"
+
+                tid = await execute_insert(db,
+                    """INSERT INTO job_tasks
+                        (work_job_id, section_id, step_id, task_number,
+                         step_type, label, description, is_automated,
+                         source, status, params)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'procedure', ?, ?)""",
+                    (job_id, sec["id"], st["id"], task_number,
+                     st["step_type"], st["label"], st.get("description"),
+                     is_automated, status,
+                     json_col(from_json(st.get("param_overrides")) or {})))
+                task_ids.append(tid)
+
+        # Update station state
+        s = _stations[station_id]
+        s["work_job_id"] = job_id
+        s["work_order_item_id"] = work_order_item_id
+
+        # Check if first task is automated
+        first_task = await execute_one(db,
+            """SELECT * FROM job_tasks
+               WHERE work_job_id = ? ORDER BY task_number ASC LIMIT 1""", (job_id,))
+        if first_task and first_task.get("is_automated"):
+            s["state"] = "running"
+            s["current_task_label"] = first_task["label"]
+            await execute_update(db,
+                "UPDATE job_tasks SET status = 'in_progress', start_time = datetime('now') WHERE id = ?",
+                (first_task["id"],))
+        else:
+            s["state"] = "ready"
+            s["current_task_label"] = "Awaiting manual input"
+
+        # Set first non-automated task to awaiting_input
+        first_manual = await execute_one(db,
+            """SELECT * FROM job_tasks
+               WHERE work_job_id = ? AND is_automated = 0
+               ORDER BY task_number ASC LIMIT 1""", (job_id,))
+        if first_manual:
+            await execute_update(db,
+                "UPDATE job_tasks SET status = 'awaiting_input' WHERE id = ?",
+                (first_manual["id"],))
+            if not (first_task and first_task.get("is_automated")):
+                s["current_task_label"] = first_manual["label"]
+            # Broadcast awaiting input
+            await _broadcast_task_awaiting_input(station_id, {
+                "task_id": first_manual["id"],
+                "label": first_manual["label"],
+                "step_type": first_manual["step_type"],
+            })
+
+        # Update WO item status
+        await execute_update(db,
+            "UPDATE work_order_items SET status = 'testing', current_station_id = ? WHERE id = ?",
+            (station_id, work_order_item_id))
+
+        return {
+            "work_job_id": job_id,
+            "tasks_created": len(task_ids),
+            "estimated_hours": 0,
+            "cmm": tech_pub.get("cmm_number", ""),
+            "message": f"Job started with {len(task_ids)} tasks",
+        }
+
+
 # -- Sessions (legacy, read-only — sourced from work_jobs) --
 
 @app.get("/api/sessions")
@@ -1711,15 +2333,68 @@ async def get_sessions_slash():
 
 @app.get("/api/reports/{job_id}")
 async def get_report(job_id: int):
-    """Get assembled report data for a work job"""
+    """Get assembled report data for a work job.
+    Uses test_reports table if available, falls back to work_job_tasks/job_tasks."""
     async with get_db() as db:
+        # Check test_reports first (v2.0 structured report)
+        report = await execute_one(db,
+            "SELECT * FROM test_reports WHERE work_job_id = ?", (job_id,))
+        if report:
+            report["failure_reasons"] = from_json(report.get("failure_reasons")) or []
+            report["station_equipment"] = from_json(report.get("station_equipment")) or []
+            report["tools_used"] = from_json(report.get("tools_used")) or []
+            report["manual_test_summary"] = from_json(report.get("manual_test_summary")) or {}
+
+            # Get job_tasks for full detail
+            tasks = await execute_all(db,
+                "SELECT * FROM job_tasks WHERE work_job_id = ? ORDER BY task_number", (job_id,))
+            for t in tasks:
+                t["params"] = from_json(t.get("params")) or {}
+                t["measured_values"] = from_json(t.get("measured_values")) or {}
+                t["chart_data"] = from_json(t.get("chart_data")) or []
+            report["tasks"] = tasks
+            return {
+                "report": report,
+                "task_count": len(tasks),
+                "generated_at": report.get("report_generated_at", datetime.now().isoformat()),
+                "source": "test_reports",
+            }
+
+        # Fallback: assemble from work_job + tasks
         j = await execute_one(db, "SELECT * FROM work_jobs WHERE id = ?", (job_id,))
         if not j:
             raise HTTPException(404, "Work job not found")
+
+        # Try job_tasks (v2.0) first, then work_job_tasks (legacy)
         tasks = await execute_all(db,
+            "SELECT * FROM job_tasks WHERE work_job_id = ? ORDER BY task_number", (job_id,))
+        if tasks:
+            tools_map = {}
+            for t in tasks:
+                t["params"] = from_json(t.get("params")) or {}
+                t["measured_values"] = from_json(t.get("measured_values")) or {}
+                t["chart_data"] = from_json(t.get("chart_data")) or []
+                # Get tool usage
+                tool_usages = await execute_all(db,
+                    "SELECT * FROM task_tool_usage WHERE job_task_id = ?", (t["id"],))
+                t["tools_used"] = tool_usages
+                for tu in tool_usages:
+                    if tu["tool_id"] not in tools_map:
+                        tools_map[tu["tool_id"]] = tu
+            j["tasks"] = tasks
+            return {
+                "job": j,
+                "tools_used_summary": list(tools_map.values()),
+                "task_count": len(tasks),
+                "generated_at": datetime.now().isoformat(),
+                "source": "job_tasks",
+            }
+
+        # Legacy fallback: work_job_tasks
+        legacy_tasks = await execute_all(db,
             "SELECT * FROM work_job_tasks WHERE work_job_id = ? ORDER BY task_number", (job_id,))
         tools_map = {}
-        for t in tasks:
+        for t in legacy_tasks:
             t["params"] = from_json(t["params"]) or {}
             t["tools_used"] = from_json(t["tools_used"]) or []
             t["measured_values"] = from_json(t["measured_values"]) or {}
@@ -1728,12 +2403,13 @@ async def get_report(job_id: int):
                 tid = tool.get("tool_id")
                 if tid and tid not in tools_map:
                     tools_map[tid] = tool
-        j["tasks"] = tasks
+        j["tasks"] = legacy_tasks
         return {
             "job": j,
             "tools_used_summary": list(tools_map.values()),
-            "task_count": len(tasks),
+            "task_count": len(legacy_tasks),
             "generated_at": datetime.now().isoformat(),
+            "source": "work_job_tasks",
         }
 
 
@@ -1747,16 +2423,23 @@ async def generate_report(job_id: int):
 @app.get("/api/admin/system/info")
 async def system_info():
     return {
-        "version": "1.4.1-mock",
+        "version": "2.0.0-mock",
         "mode": "UI/UX Testing (Mock Backend)",
         "stations": 12,
         "uptime_s": 3600,
-        "platform": "Windows 11",
+        "platform": "Linux",
         "python": "3.11",
         "hardware_connected": False,
         "i2c_bus": "MOCK",
         "psu_count": 0,
         "load_count": 0,
+        "features": [
+            "procedure_resolution",
+            "job_tasks",
+            "tool_validation",
+            "test_reports",
+            "task_awaiting_input",
+        ],
     }
 
 
@@ -1793,16 +2476,27 @@ if __name__ == "__main__":
     _host_ip = "0.0.0.0"
     _port = 8000
     _has_frontend = _frontend_build.exists()
-    print("\n  Battery Test Bench - Mock Server (UI/UX Testing)")
-    print("  ================================================")
+    print("\n  Battery Test Bench - Mock Server v2.0.0 (UI/UX Testing)")
+    print("  ======================================================")
     print(f"  Backend:   http://localhost:{_port}")
     if _has_frontend:
         print(f"  Frontend:  http://localhost:{_port}  (served from build/)")
     else:
         print("  Frontend:  http://localhost:3001 (run 'npm run dev' in frontend/)")
     print("  Database:  SQLite (backend/data/battery_bench.db)")
-    print("  Seed data: 12 stations, 5 customers, 5 work orders, 7 profiles, 3 tech pubs, 8 recipes, 6 tools")
+    print("  Seed data: 12 stations, 5 customers, 5 work orders, 7 profiles,")
+    print("             3 tech pubs, 8 recipes, 6 tools, 30 procedure sections,")
+    print("             ~45 procedure steps, 3 tech_pub_applicability records")
     print(f"  WebSocket: ws://localhost:{_port}/api/ws/live")
+    print()
+    print("  v2.0 endpoints:")
+    print("    /api/procedures/sections/{tech_pub_id}  GET sections")
+    print("    /api/procedures/steps/{section_id}      GET steps")
+    print("    /api/procedures/resolve/{item_id}       GET resolve procedure")
+    print("    /api/job-tasks/start-job                POST start job")
+    print("    /api/job-tasks/job/{job_id}             GET job tasks")
+    print("    /api/job-tasks/{task_id}/submit         POST submit manual result")
+    print("    /api/job-tasks/awaiting-input/{sid}     GET awaiting tasks")
     print()
 
     uvicorn.run(app, host=_host_ip, port=_port, log_level="info")
