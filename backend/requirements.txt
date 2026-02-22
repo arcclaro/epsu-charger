@@ -1,0 +1,41 @@
+# Battery Test Bench - Backend Dependencies
+# Version: 1.0.1
+#
+# Changelog:
+# v1.0.1 (2026-02-20): Updated minimum versions for Pi 5 deployment;
+#                       marked heavy deps (influxdb, matplotlib, reportlab) as optional
+# v1.0.0 (2026-02-12): Initial dependencies
+
+# === Core (required for mock_server.py) ===
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+websockets>=12.0
+pydantic>=2.10.0
+pydantic-settings>=2.5.0
+aiosqlite>=0.20.0
+
+# === Production (required for main.py with real hardware) ===
+# smbus2>=0.4.3           # I2C Communication (RPi only)
+# influxdb-client>=1.40.0 # Time-series database
+# sqlalchemy>=2.0.25
+# pyvisa>=1.14.1          # SCPI Communication
+# pyvisa-py>=0.7.1
+# python-multipart>=0.0.6
+
+# === Reporting (optional, for PDF generation) ===
+# matplotlib>=3.8.2
+# reportlab>=4.0.9
+# Pillow>=10.2.0
+
+# === Authentication (optional, for Authentik SSO) ===
+# python-jose[cryptography]>=3.3.0
+# passlib[bcrypt]>=1.7.4
+
+# === Utilities ===
+# python-dotenv>=1.0.0
+# pyserial>=3.5
+
+# === Testing ===
+# pytest>=7.4.4
+# pytest-asyncio>=0.23.3
+# httpx>=0.26.0

@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data / Runtime
+*.db
+*.sqlite
+*.sqlite3
+data/
+reports/
+logs/
+
+# Environment
+.env
+.env.local
+
+# Claude Code
+.claude/
+
+# Node / Frontend build artifacts
+node_modules/
+frontend/build/
+frontend/dist/
+frontend/.next/
+
+# Misc
+*.log
+*.pid
+*.sock
