@@ -25,11 +25,19 @@ export function getWorkJobs(params?: {
   work_order_id?: number;
   station_id?: number;
   status?: string;
+  customer_id?: number;
+  from_date?: string;
+  to_date?: string;
+  search?: string;
 }): Promise<WorkJob[]> {
   const qs = new URLSearchParams();
   if (params?.work_order_id) qs.set('work_order_id', String(params.work_order_id));
   if (params?.station_id) qs.set('station_id', String(params.station_id));
   if (params?.status) qs.set('status', params.status);
+  if (params?.customer_id) qs.set('customer_id', String(params.customer_id));
+  if (params?.from_date) qs.set('from_date', params.from_date);
+  if (params?.to_date) qs.set('to_date', params.to_date);
+  if (params?.search) qs.set('search', params.search);
   const s = qs.toString();
   return get(`/work-jobs${s ? `?${s}` : ''}`);
 }

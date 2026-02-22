@@ -722,8 +722,21 @@ async def init_db():
         await _add_column_if_missing(db, "battery_profiles", "tech_pub_id",
                                      "INTEGER")
 
-        # tools: tool_id_display (TID format)
+        # tools: tool_id_display (TID format), verification fields, TCP/IP, station
         await _add_column_if_missing(db, "tools", "tool_id_display", "TEXT")
+        await _add_column_if_missing(db, "tools", "verification_cycle_days", "INTEGER", 180)
+        await _add_column_if_missing(db, "tools", "tcp_ip_address", "TEXT")
+        await _add_column_if_missing(db, "tools", "designated_station", "INTEGER")
+        await _add_column_if_missing(db, "tools", "verification_date", "TEXT")
+
+        # tech_pubs: manufacturer (alias for issued_by)
+        await _add_column_if_missing(db, "tech_pubs", "manufacturer", "TEXT")
+
+        # tech_pub_applicability: service_type
+        await _add_column_if_missing(db, "tech_pub_applicability", "service_type", "TEXT", "'inspection_test'")
+
+        # work_orders: internal_work_number
+        await _add_column_if_missing(db, "work_orders", "internal_work_number", "TEXT")
 
         # work_jobs: profile_id, procedure_snapshot, overall_result
         await _add_column_if_missing(db, "work_jobs", "profile_id", "INTEGER")

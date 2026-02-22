@@ -60,8 +60,7 @@ export const TASK_STATUS_COLORS: Record<string, string> = {
 };
 
 export const SERVICE_TYPES = [
-  { value: 'capacity_test', label: 'Capacity Test' },
-  { value: 'inspection', label: 'Inspection Only' },
-  { value: 'full_overhaul', label: 'Full Overhaul' },
-  { value: 'fast_discharge_test', label: 'Fast Discharge Test' },
+  { value: 'inspection_test', label: 'Inspection/Test' },
+  { value: 'repair', label: 'Repair' },
+  { value: 'overhaul', label: 'Overhaul' },
 ];

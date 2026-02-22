@@ -31,3 +31,12 @@ export function formatResistance(mohm: number): string {
 export function formatWeight(kg: number): string {
   return `${kg.toFixed(2)} kg`;
 }
+
+export function formatTechPubRef(cmm?: string, revision?: string, ata?: string, date?: string): string {
+  const parts: string[] = [];
+  if (cmm) parts.push(cmm);
+  if (revision) parts.push(`Rev ${revision}`);
+  if (ata) parts.push(`ATA ${ata}`);
+  if (date) parts.push(new Date(date).toLocaleDateString());
+  return parts.join(' \u00b7 ');
+}

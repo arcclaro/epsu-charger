@@ -1,8 +1,9 @@
 """
 Battery Test Bench - Admin API
-Version: 1.0.1
+Version: 1.1.0
 
 Changelog:
+v1.1.0 (2026-02-22): Rewrite system_info for real metrics; flatten system_health
 v1.0.1 (2026-02-12): Initial admin endpoints
 """
 
@@ -14,6 +15,9 @@ import aiosqlite
 from config import settings
 from datetime import date, timedelta
 import json
+import socket
+import platform
+import time
 
 router = APIRouter()
 
@@ -173,61 +177,78 @@ async def delete_config(key: str):
 
 @router.get("/system/info")
 async def system_info():
-    """Get system information"""
-    import platform
+    """Get system information matching frontend SystemInfo interface"""
     import psutil
 
+    mem = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+
+    cpu_temp_c = None
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            cpu_temp_c = round(int(f.read().strip()) / 1000, 1)
+    except Exception:
+        pass
+
     return {
+        "version": settings.APP_VERSION,
+        "hostname": socket.gethostname(),
         "platform": platform.platform(),
-        "python_version": platform.python_version(),
-        "cpu_count": psutil.cpu_count(),
-        "memory_total_gb": round(psutil.virtual_memory().total / (1024**3), 2),
-        "memory_available_gb": round(psutil.virtual_memory().available / (1024**3), 2),
-        "disk_usage_percent": psutil.disk_usage('/').percent,
-        "app_version": settings.APP_VERSION
+        "python": platform.python_version(),
+        "stations": 12,
+        "cpu_percent": psutil.cpu_percent(interval=0.5),
+        "memory_used_mb": round(mem.used / 1048576),
+        "memory_total_mb": round(mem.total / 1048576),
+        "memory_percent": mem.percent,
+        "disk_free_gb": round(disk.free / 1073741824, 1),
+        "disk_total_gb": round(disk.total / 1073741824, 1),
+        "disk_percent": disk.percent,
+        "cpu_temp_c": cpu_temp_c,
+        "uptime_s": round(time.time() - psutil.boot_time())
     }
 
 
 @router.get("/system/health")
 async def system_health():
-    """Comprehensive system health check"""
+    """Flat system health check matching frontend HealthCheck interface"""
     from services import i2c_poller, station_manager, data_logger
 
-    health = {
-        "overall": "healthy",
-        "services": {}
-    }
+    overall = "healthy"
 
-    # Check I2C poller
-    try:
-        i2c_status = await i2c_poller.get_status()
-        health["services"]["i2c_poller"] = {
-            "status": "healthy" if i2c_status["running"] else "stopped",
-            "last_poll": i2c_status.get("last_poll")
-        }
-    except Exception as e:
-        health["services"]["i2c_poller"] = {"status": "error", "error": str(e)}
-        health["overall"] = "degraded"
-
-    # Check InfluxDB
-    try:
-        influx_status = await data_logger.check_influxdb_connection()
-        health["services"]["influxdb"] = {
-            "status": "healthy" if influx_status else "disconnected"
-        }
-        if not influx_status:
-            health["overall"] = "degraded"
-    except Exception as e:
-        health["services"]["influxdb"] = {"status": "error", "error": str(e)}
-        health["overall"] = "degraded"
-
-    # Check SQLite
+    # Check database (SQLite)
+    db_status = "ok"
     try:
         async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
             await db.execute("SELECT 1")
-        health["services"]["sqlite"] = {"status": "healthy"}
-    except Exception as e:
-        health["services"]["sqlite"] = {"status": "error", "error": str(e)}
-        health["overall"] = "degraded"
+    except Exception:
+        db_status = "error"
+        overall = "degraded"
 
-    return health
+    # Check InfluxDB
+    influx_status = "ok"
+    try:
+        influx_ok = await data_logger.check_influxdb_connection()
+        if not influx_ok:
+            influx_status = "error"
+            overall = "degraded"
+    except Exception:
+        influx_status = "error"
+        overall = "degraded"
+
+    # Check I2C poller
+    i2c_status = "ok"
+    try:
+        poller_info = await i2c_poller.get_status()
+        if not poller_info.get("running"):
+            i2c_status = "error"
+            overall = "degraded"
+    except Exception:
+        i2c_status = "error"
+        overall = "degraded"
+
+    return {
+        "status": overall,
+        "database": db_status,
+        "influxdb": influx_status,
+        "i2c_poller": i2c_status,
+    }

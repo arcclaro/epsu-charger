@@ -44,8 +44,7 @@ function ToggleField({
 }
 
 const emptyForm: Record<string, string | boolean> = {
-  part_number: '',
-  amendment: '',
+  part_number_display: '',
   description: '',
   manufacturer: '',
   nominal_voltage_v: '',
@@ -64,8 +63,6 @@ const emptyForm: Record<string, string | boolean> = {
   fast_charge_current_a: '',
   fast_charge_max_duration_min: '',
   fast_charge_delta_v_mv: '',
-  trickle_charge_current_ma: '',
-  trickle_charge_voltage_max_mv: '',
   partial_charge_duration_h: '',
   rest_period_age_threshold_months: '',
   rest_period_duration_h: '',
@@ -116,11 +113,19 @@ export function AdminBatteryProfiles() {
     setEditing(p);
     const f: Record<string, string | boolean> = {};
     for (const key of Object.keys(emptyForm)) {
-      const val = (p as unknown as Record<string, unknown>)[key];
-      if (typeof emptyForm[key] === 'boolean') {
-        f[key] = !!val;
+      if (key === 'part_number_display') {
+        const pn = (p as unknown as Record<string, unknown>)['part_number'];
+        const amdt = (p as unknown as Record<string, unknown>)['amendment'];
+        const pnStr = pn != null ? String(pn) : '';
+        const amdtStr = amdt != null ? String(amdt) : '';
+        f[key] = `${pnStr} Amdt-${amdtStr}`;
       } else {
-        f[key] = val != null ? String(val) : '';
+        const val = (p as unknown as Record<string, unknown>)[key];
+        if (typeof emptyForm[key] === 'boolean') {
+          f[key] = !!val;
+        } else {
+          f[key] = val != null ? String(val) : '';
+        }
       }
     }
     setForm(f);
@@ -140,7 +145,18 @@ export function AdminBatteryProfiles() {
     try {
       const payload: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(form)) {
-        if (typeof v === 'boolean') {
+        if (k === 'part_number_display') {
+          const raw = v as string;
+          const sepIdx = raw.indexOf(' Amdt-');
+          if (sepIdx !== -1) {
+            payload['part_number'] = raw.slice(0, sepIdx);
+            const amdt = raw.slice(sepIdx + 6); // length of ' Amdt-' is 6
+            if (amdt) payload['amendment'] = amdt;
+          } else {
+            // No ' Amdt-' separator found — treat entire value as part_number
+            if (raw) payload['part_number'] = raw;
+          }
+        } else if (typeof v === 'boolean') {
           payload[k] = v;
         } else if (v === '') {
           // skip empty optional strings
@@ -150,7 +166,7 @@ export function AdminBatteryProfiles() {
             'std_charge_current_ma', 'std_charge_duration_h', 'std_charge_voltage_limit_mv', 'std_charge_temp_max_c',
             'cap_test_current_a', 'cap_test_voltage_min_mv', 'cap_test_duration_min', 'cap_test_temp_max_c',
             'fast_charge_current_a', 'fast_charge_max_duration_min', 'fast_charge_delta_v_mv',
-            'trickle_charge_current_ma', 'trickle_charge_voltage_max_mv', 'partial_charge_duration_h',
+            'partial_charge_duration_h',
             'rest_period_age_threshold_months', 'rest_period_duration_h',
             'emergency_temp_max_c', 'emergency_temp_min_c',
           ].includes(k)
@@ -220,8 +236,7 @@ export function AdminBatteryProfiles() {
           <p className="col-span-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
             Basic Information
           </p>
-          <FormField label="Part Number" name="part_number" value={s('part_number')} onChange={onStr} required />
-          <FormField label="Amendment" name="amendment" value={s('amendment')} onChange={onStr} />
+          <FormField label="Part Number (incl. Amendment)" name="part_number_display" value={s('part_number_display')} onChange={onStr} required placeholder="3214-31 Amdt-A" />
           <FormField label="Description" name="description" value={s('description')} onChange={onStr} required className="col-span-2" />
           <FormField label="Manufacturer" name="manufacturer" value={s('manufacturer')} onChange={onStr} required />
           <FormField label="Chemistry" name="chemistry" value={s('chemistry')} onChange={onStr} required placeholder="NiCd, NiMH, Li-Ion" />
@@ -253,8 +268,6 @@ export function AdminBatteryProfiles() {
           <FormField label="Fast Charge Current (A)" name="fast_charge_current_a" value={s('fast_charge_current_a')} onChange={onStr} type="number" />
           <FormField label="Max Duration (min)" name="fast_charge_max_duration_min" value={s('fast_charge_max_duration_min')} onChange={onStr} type="number" />
           <FormField label="Delta-V (mV)" name="fast_charge_delta_v_mv" value={s('fast_charge_delta_v_mv')} onChange={onStr} type="number" />
-          <FormField label="Trickle Current (mA)" name="trickle_charge_current_ma" value={s('trickle_charge_current_ma')} onChange={onStr} type="number" />
-          <FormField label="Trickle Voltage Max (mV)" name="trickle_charge_voltage_max_mv" value={s('trickle_charge_voltage_max_mv')} onChange={onStr} type="number" />
           <FormField label="Partial Charge Duration (h)" name="partial_charge_duration_h" value={s('partial_charge_duration_h')} onChange={onStr} type="number" />
 
           {/* Safety / Rest */}

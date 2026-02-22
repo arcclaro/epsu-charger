@@ -1,8 +1,10 @@
 """
 Battery Test Bench - Work Order API Endpoints (Orion Technik)
-Version: 1.2.4
+Version: 1.3.0
 
 Changelog:
+v1.3.0 (2026-02-22): Simplified intake (single battery), open/closed filter,
+                      items key, DELETE endpoint, full PUT model
 v1.2.4 (2026-02-16): Orion Technik WO is primary reference (auto-generated);
                       customer reference is optional; added battery revision field
 v1.2.3 (2026-02-16): Simplified to battery intake model
@@ -35,18 +37,29 @@ class BatteryIntakeItem(BaseModel):
 
 class WorkOrderIntake(BaseModel):
     """
-    Battery intake form — Orion Technik WO is auto-generated as the
-    primary work reference. Customer reference is optional.
-    Each battery requires PN, SN, revision, and optionally amendment.
+    Battery intake form — accepts both single-battery simplified flow
+    and legacy multi-battery flow.
     """
+    work_order_number: Optional[str] = None
     customer_id: int
     customer_reference: Optional[str] = Field(None, description="Customer's own reference (optional)")
-    service_type: str = "capacity_test"
+    service_type: str = "inspection_test"
     customer_notes: Optional[str] = None
-    batteries: List[BatteryIntakeItem] = []
+    internal_work_number: Optional[str] = None
+    # Single battery (new simplified flow)
+    part_number: Optional[str] = None
+    serial_number: Optional[str] = None
+    revision: Optional[str] = ""
+    amendment: Optional[str] = None
+    # Legacy multi-battery
+    batteries: Optional[List[BatteryIntakeItem]] = None
 
 
 class WorkOrderUpdate(BaseModel):
+    work_order_number: Optional[str] = None
+    customer_id: Optional[int] = None
+    service_type: Optional[str] = None
+    internal_work_number: Optional[str] = None
     status: Optional[str] = None
     technician_notes: Optional[str] = None
     assigned_technician: Optional[str] = None
@@ -89,8 +102,13 @@ async def list_work_orders(
         conditions = []
 
         if status:
-            conditions.append("wo.status = ?")
-            params.append(status)
+            if status == "open":
+                conditions.append("wo.status IN ('received', 'in_progress')")
+            elif status == "closed":
+                conditions.append("wo.status IN ('completed', 'closed')")
+            else:
+                conditions.append("wo.status = ?")
+                params.append(status)
         if customer_id:
             conditions.append("wo.customer_id = ?")
             params.append(customer_id)
@@ -136,34 +154,49 @@ async def get_work_order(wo_id: int):
         items = await cursor.fetchall()
 
         result = dict(wo)
-        result['batteries'] = [dict(item) for item in items]
+        result['items'] = [dict(item) for item in items]
         return result
 
 
 @router.post("/")
 async def receive_batteries(data: WorkOrderIntake):
     """
-    Record battery intake — Orion Technik WO number is auto-generated.
-    Customer reference is optional.
+    Record battery intake — accepts single-battery or multi-battery.
+    WO number is user-provided or auto-generated.
     """
     async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
-        # Generate Orion Technik work order number
-        wo_number = await _generate_tracking_number(db)
+        # Use provided WO number or auto-generate
+        wo_number = data.work_order_number
+        if not wo_number:
+            wo_number = await _generate_tracking_number(db)
 
         cursor = await db.execute("""
             INSERT INTO work_orders
                 (work_order_number, customer_reference, customer_id,
-                 service_type, received_date, customer_notes)
-            VALUES (?, ?, ?, ?, ?, ?)
+                 service_type, received_date, customer_notes,
+                 internal_work_number)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             wo_number, data.customer_reference, data.customer_id,
             data.service_type, datetime.now().isoformat(),
-            data.customer_notes
+            data.customer_notes, data.internal_work_number
         ))
         wo_id = cursor.lastrowid
 
+        # Build battery list: use batteries if provided, else single battery fields
+        batteries: List[BatteryIntakeItem] = []
+        if data.batteries:
+            batteries = data.batteries
+        elif data.part_number and data.serial_number:
+            batteries = [BatteryIntakeItem(
+                serial_number=data.serial_number,
+                part_number=data.part_number,
+                revision=data.revision or "",
+                amendment=data.amendment,
+            )]
+
         # Add battery items
-        for battery in data.batteries:
+        for battery in batteries:
             # Auto-match battery profile by part number
             profile_cursor = await db.execute("""
                 SELECT id FROM battery_profiles
@@ -186,17 +219,29 @@ async def receive_batteries(data: WorkOrderIntake):
 
         await db.commit()
 
+        # Fetch the created work order to return full object
+        db.row_factory = aiosqlite.Row
+        wo_cursor = await db.execute("""
+            SELECT wo.*, c.name as customer_name,
+                   COUNT(woi.id) as item_count
+            FROM work_orders wo
+            LEFT JOIN customers c ON wo.customer_id = c.id
+            LEFT JOIN work_order_items woi ON woi.work_order_id = wo.id
+            WHERE wo.id = ?
+            GROUP BY wo.id
+        """, (wo_id,))
+        wo_row = await wo_cursor.fetchone()
+
         return {
-            "id": wo_id,
-            "work_order_number": wo_number,
-            "battery_count": len(data.batteries),
-            "message": f"WO {wo_number} created with {len(data.batteries)} batteries"
+            "status": "ok",
+            "message": f"WO {wo_number} created with {len(batteries)} batteries",
+            "work_order": dict(wo_row) if wo_row else {"id": wo_id, "work_order_number": wo_number}
         }
 
 
 @router.put("/{wo_id}")
 async def update_work_order(wo_id: int, data: WorkOrderUpdate):
-    """Update a work order status or notes"""
+    """Update a work order (all editable fields)"""
     async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
         updates = []
         params = []
@@ -217,7 +262,35 @@ async def update_work_order(wo_id: int, data: WorkOrderUpdate):
         )
         await db.commit()
 
-        return {"success": True, "message": f"Work order {wo_id} updated"}
+        # Return updated work order
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("""
+            SELECT wo.*, c.name as customer_name
+            FROM work_orders wo
+            LEFT JOIN customers c ON wo.customer_id = c.id
+            WHERE wo.id = ?
+        """, (wo_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return {"success": True, "message": f"Work order {wo_id} updated"}
+        return dict(row)
+
+
+@router.delete("/{wo_id}")
+async def delete_work_order(wo_id: int):
+    """Delete a work order and its items."""
+    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
+        # Check existence
+        cursor = await db.execute("SELECT id FROM work_orders WHERE id = ?", (wo_id,))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Work order not found")
+
+        # Delete items first, then work order
+        await db.execute("DELETE FROM work_order_items WHERE work_order_id = ?", (wo_id,))
+        await db.execute("DELETE FROM work_orders WHERE id = ?", (wo_id,))
+        await db.commit()
+
+        return {"status": "ok"}
 
 
 @router.post("/{wo_id}/items/{item_id}/assign")

@@ -14,6 +14,7 @@ export interface WorkOrder {
   assigned_technician?: string;
   customer_notes?: string;
   technician_notes?: string;
+  internal_work_number?: string;
   estimated_cost?: number;
   actual_cost?: number;
   invoiced: boolean;
@@ -51,15 +52,10 @@ export interface WorkOrderItem {
 }
 
 export interface WorkOrderIntake {
+  work_order_number: string;
   customer_id: number;
-  customer_reference?: string;
-  service_type?: string;
-  customer_notes?: string;
-  batteries: {
-    serial_number: string;
-    part_number: string;
-    revision: string;
-    amendment?: string;
-    reported_condition?: string;
-  }[];
+  part_number: string;
+  serial_number: string;
+  service_type: string;
+  internal_work_number?: string;
 }

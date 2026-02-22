@@ -14,14 +14,9 @@ const WorkOrderDetail = lazy(() => import('@/pages/WorkOrderDetail'));
 const JobStart = lazy(() => import('@/pages/JobStart'));
 const JobProgress = lazy(() => import('@/pages/JobProgress'));
 const JobTask = lazy(() => import('@/pages/JobTask'));
-const CustomerList = lazy(() => import('@/pages/CustomerList'));
-const CustomerDetail = lazy(() => import('@/pages/CustomerDetail'));
-const BatteryProfiles = lazy(() => import('@/pages/BatteryProfiles'));
-const TechPubs = lazy(() => import('@/pages/TechPubs'));
-const Recipes = lazy(() => import('@/pages/Recipes'));
-const Calibration = lazy(() => import('@/pages/Calibration'));
 const Admin = lazy(() => import('@/pages/Admin'));
 const Sessions = lazy(() => import('@/pages/Sessions'));
+const StationTest = lazy(() => import('@/pages/StationTest'));
 
 function App() {
   return (
@@ -31,17 +26,12 @@ function App() {
           <Route index element={<Page><Dashboard /></Page>} />
           <Route path="station/:id" element={<Page><StationDetail /></Page>} />
           <Route path="station/:id/awaiting" element={<Page><StationAwaiting /></Page>} />
+          <Route path="station/:id/test" element={<Page><StationTest /></Page>} />
           <Route path="work-orders" element={<Page><WorkOrderList /></Page>} />
           <Route path="work-orders/:woId" element={<Page><WorkOrderDetail /></Page>} />
           <Route path="work-orders/:woId/items/:itemId/start-job" element={<Page><JobStart /></Page>} />
           <Route path="jobs/:jobId" element={<Page><JobProgress /></Page>} />
           <Route path="jobs/:jobId/tasks/:taskId" element={<Page><JobTask /></Page>} />
-          <Route path="customers" element={<Page><CustomerList /></Page>} />
-          <Route path="customers/:customerId" element={<Page><CustomerDetail /></Page>} />
-          <Route path="battery-profiles" element={<Page><BatteryProfiles /></Page>} />
-          <Route path="tech-pubs" element={<Page><TechPubs /></Page>} />
-          <Route path="recipes" element={<Page><Recipes /></Page>} />
-          <Route path="calibration" element={<Page><Calibration /></Page>} />
           <Route path="admin" element={<Page><Admin /></Page>} />
           <Route path="sessions" element={<Page><Sessions /></Page>} />
         </Route>

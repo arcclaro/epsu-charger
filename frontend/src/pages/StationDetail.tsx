@@ -9,7 +9,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { formatVoltage, formatCurrent, formatTemp, formatDuration } from '@/lib/formatters';
 import { PHASE_LABELS } from '@/lib/constants';
 import { sendControl, stopStation } from '@/api/stations';
-import { AlertTriangle, Play, Square, Zap } from 'lucide-react';
+import { AlertTriangle, Play, Square, Zap, Wrench } from 'lucide-react';
 
 const StationChart = lazy(() => import('@/components/station/StationChart'));
 
@@ -143,6 +143,13 @@ export default function StationDetail() {
           >
             <Square className="h-3 w-3 mr-1" />Stop
           </Button>
+          {(s.state === 'empty' || s.state === 'ready') && (
+            <Button size="sm" variant="outline" asChild>
+              <Link to={`/station/${stationId}/test`}>
+                <Wrench className="h-3 w-3 mr-1" />Test Equipment
+              </Link>
+            </Button>
+          )}
         </CardContent>
       </Card>
     </div>

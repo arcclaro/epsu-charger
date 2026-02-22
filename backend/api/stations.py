@@ -1,8 +1,9 @@
 """
 Battery Test Bench - Station Control API
-Version: 1.2.5
+Version: 1.3.0
 
 Changelog:
+v1.3.0 (2026-02-22): Added diagnostics endpoint
 v1.2.5 (2026-02-16): Manual control supports charge/discharge/wait/stop;
                       validates against EEPROM limits
 v1.0.1 (2026-02-12): Initial station control endpoints
@@ -12,6 +13,10 @@ from fastapi import APIRouter, HTTPException, Depends
 from typing import List
 from models.station import StationStatus, ManualControlCommand, RecipeStartCommand
 from services import station_manager
+from database import get_db, execute_all
+import logging
+
+diag_logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -97,6 +102,54 @@ async def reset_station(station_id: int):
         return {"success": True, "message": f"Station {station_id} reset"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset station: {str(e)}")
+
+
+@router.get("/{station_id}/diagnostics")
+async def station_diagnostics(station_id: int):
+    """Get diagnostics report for a station."""
+    if not 1 <= station_id <= 12:
+        raise HTTPException(status_code=400, detail="Station ID must be 1-12")
+
+    report = {
+        "station_id": station_id,
+        "psu_status": "offline",
+        "load_status": "offline",
+        "rp2040_status": "offline",
+        "temp_sensor_status": "offline",
+    }
+
+    # Check PSU
+    try:
+        from services import psu_controller
+        v = await psu_controller.read_voltage(station_id)
+        report["psu_status"] = "online" if v is not None else "offline"
+    except Exception as e:
+        diag_logger.debug(f"PSU diag station {station_id}: {e}")
+        report["psu_status"] = "error"
+
+    # Check Load
+    try:
+        from services import load_controller
+        v = await load_controller.read_voltage(station_id)
+        report["load_status"] = "online" if v is not None else "offline"
+    except Exception as e:
+        diag_logger.debug(f"Load diag station {station_id}: {e}")
+        report["load_status"] = "error"
+
+    # Check RP2040 / temp sensor via I2C poller
+    try:
+        from services import i2c_poller
+        i2c_data = i2c_poller.get_station_data(station_id)
+        if i2c_data:
+            report["rp2040_status"] = "online"
+            # If temperature data exists, sensor is online
+            temp = i2c_data.get("temperature_c")
+            if temp is not None and temp > -50:
+                report["temp_sensor_status"] = "online"
+    except Exception as e:
+        diag_logger.debug(f"I2C diag station {station_id}: {e}")
+
+    return report
 
 
 @router.get("/{station_id}/eeprom")

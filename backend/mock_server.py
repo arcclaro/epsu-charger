@@ -57,6 +57,8 @@ import asyncio
 import json
 import random
 import time
+import platform
+import socket
 from datetime import datetime, timedelta
 from typing import List, Optional
 from contextlib import asynccontextmanager
@@ -66,6 +68,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 from models import init_db
 from seed import seed_if_empty
@@ -976,27 +983,37 @@ async def delete_customer(customer_id: int):
 # -- Work Orders (Full CRUD) --
 
 @app.get("/api/work-orders")
-async def get_work_orders(status: str = "", search: str = ""):
+async def get_work_orders(status: str = "", search: str = "", customer_id: int = 0):
     async with get_db() as db:
         base = """SELECT wo.*, c.name as customer_name FROM work_orders wo
                   LEFT JOIN customers c ON wo.customer_id = c.id"""
         conditions = []
         params = []
         if status:
-            conditions.append("wo.status = ?")
-            params.append(status)
+            if status == "open":
+                conditions.append("wo.status IN ('received', 'in_progress')")
+            elif status == "closed":
+                conditions.append("wo.status = 'completed'")
+            else:
+                conditions.append("wo.status = ?")
+                params.append(status)
+        if customer_id:
+            conditions.append("wo.customer_id = ?")
+            params.append(customer_id)
         if search:
             q = f"%{search}%"
             conditions.append("(wo.work_order_number LIKE ? OR wo.customer_reference LIKE ? OR c.name LIKE ?)")
             params.extend([q, q, q])
         if conditions:
             base += " WHERE " + " AND ".join(conditions)
+        base += " ORDER BY wo.id DESC"
         orders = await execute_all(db, base, params)
         for wo in orders:
             items = await execute_all(db,
                 "SELECT * FROM work_order_items WHERE work_order_id = ?", (wo["id"],))
             wo["items"] = items
             wo["battery_count"] = len(items)
+            wo["item_count"] = len(items)
         return orders
 
 
@@ -1019,21 +1036,34 @@ async def get_work_order(wo_id: int):
 @app.post("/api/work-orders")
 async def create_work_order(data: dict):
     async with get_db() as db:
-        # Generate WO number
-        max_row = await execute_one(db, "SELECT MAX(id) as maxid FROM work_orders")
-        next_num = (max_row["maxid"] or 0) + 1
-        wo_number = f"OT-2026-{next_num:04d}"
+        # Accept WO number from user, or auto-generate
+        wo_number = data.get("work_order_number")
+        if not wo_number:
+            max_row = await execute_one(db, "SELECT MAX(id) as maxid FROM work_orders")
+            next_num = (max_row["maxid"] or 0) + 1
+            wo_number = f"OT-2026-{next_num:04d}"
 
         wo_id = await execute_insert(db,
             """INSERT INTO work_orders (work_order_number, customer_reference, customer_id,
-               service_type, priority, status, received_date, assigned_technician, customer_notes)
-            VALUES (?, ?, ?, ?, ?, 'received', ?, '', ?)""",
+               service_type, priority, status, received_date, assigned_technician,
+               customer_notes, internal_work_number)
+            VALUES (?, ?, ?, ?, ?, 'received', ?, '', ?, ?)""",
             (wo_number, data.get("customer_reference", ""), data.get("customer_id"),
-             data.get("service_type", "capacity_test"), data.get("priority", "normal"),
-             datetime.now().isoformat(), data.get("customer_notes", "")))
+             data.get("service_type", "inspection_test"), data.get("priority", "normal"),
+             datetime.now().isoformat(), data.get("customer_notes", ""),
+             data.get("internal_work_number", "")))
 
         items = []
-        for bat in data.get("batteries", []):
+        # Support single battery (part_number + serial_number at top level)
+        batteries = data.get("batteries", [])
+        if not batteries and data.get("serial_number") and data.get("part_number"):
+            batteries = [{
+                "serial_number": data["serial_number"],
+                "part_number": data["part_number"],
+                "revision": data.get("revision", ""),
+                "amendment": data.get("amendment", ""),
+            }]
+        for bat in batteries:
             item_id = await execute_insert(db,
                 """INSERT INTO work_order_items (work_order_id, serial_number, part_number,
                    revision, amendment, reported_condition, status)
@@ -1166,6 +1196,13 @@ async def get_tech_pubs():
         pubs = await execute_all(db, "SELECT * FROM tech_pubs")
         for tp in pubs:
             tp["applicable_part_numbers"] = from_json(tp["applicable_part_numbers"]) or []
+            if not tp.get("manufacturer"):
+                tp["manufacturer"] = tp.get("issued_by", "")
+            # Include applicability with service_type
+            rows = await execute_all(db,
+                "SELECT part_number, service_type FROM tech_pub_applicability WHERE tech_pub_id = ?",
+                (tp["id"],))
+            tp["applicability"] = rows
         return pubs
 
 
@@ -1207,15 +1244,17 @@ async def get_tech_pub(tech_pub_id: int):
 async def create_tech_pub(data: dict):
     async with get_db() as db:
         apn = json_col(data.get("applicable_part_numbers", []))
+        manufacturer = data.get("manufacturer") or data.get("issued_by", "")
         new_id = await execute_insert(db,
             """INSERT INTO tech_pubs (cmm_number, title, revision, revision_date,
-               applicable_part_numbers, ata_chapter, issued_by, notes, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               applicable_part_numbers, ata_chapter, issued_by, manufacturer, notes, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (data.get("cmm_number"), data.get("title"), data.get("revision"),
              data.get("revision_date"), apn, data.get("ata_chapter"),
-             data.get("issued_by"), data.get("notes"), data.get("is_active", True)))
+             manufacturer, manufacturer, data.get("notes"), data.get("is_active", True)))
         tp = await execute_one(db, "SELECT * FROM tech_pubs WHERE id = ?", (new_id,))
         tp["applicable_part_numbers"] = from_json(tp["applicable_part_numbers"]) or []
+        tp["manufacturer"] = tp.get("manufacturer") or tp.get("issued_by", "")
         return tp
 
 
@@ -1261,12 +1300,30 @@ async def create_tech_pub_applicability(data: dict):
     async with get_db() as db:
         new_id = await execute_insert(db,
             """INSERT INTO tech_pub_applicability
-                (tech_pub_id, part_number, amendment, effective_date, notes)
-            VALUES (?, ?, ?, ?, ?)""",
+                (tech_pub_id, part_number, amendment, effective_date, notes, service_type)
+            VALUES (?, ?, ?, ?, ?, ?)""",
             (data.get("tech_pub_id"), data.get("part_number"),
              data.get("amendment", ""), data.get("effective_date"),
-             data.get("notes")))
+             data.get("notes"), data.get("service_type", "inspection_test")))
         return await execute_one(db, "SELECT * FROM tech_pub_applicability WHERE id = ?", (new_id,))
+
+
+@app.put("/api/tech-pubs/{tech_pub_id}/applicability")
+async def bulk_replace_applicability(tech_pub_id: int, data: dict):
+    """Bulk replace all applicability rows for a tech pub."""
+    async with get_db() as db:
+        existing = await execute_one(db, "SELECT id FROM tech_pubs WHERE id = ?", (tech_pub_id,))
+        if not existing:
+            raise HTTPException(404, "Tech pub not found")
+        await execute_update(db, "DELETE FROM tech_pub_applicability WHERE tech_pub_id = ?", (tech_pub_id,))
+        entries = data.get("entries", [])
+        for entry in entries:
+            await execute_insert(db,
+                """INSERT INTO tech_pub_applicability
+                    (tech_pub_id, part_number, service_type)
+                VALUES (?, ?, ?)""",
+                (tech_pub_id, entry.get("part_number", ""), entry.get("service_type", "inspection_test")))
+        return await execute_all(db, "SELECT * FROM tech_pub_applicability WHERE tech_pub_id = ?", (tech_pub_id,))
 
 
 # -- Procedures (Tech Pub Sections & Steps) --
@@ -1597,6 +1654,29 @@ async def delete_recipe(recipe_id: int):
 
 # -- Calibrated Tools --
 
+def _enrich_tool(t):
+    """Map verification fields and compute validity status."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    # Map calibration_date → verification_date if not already set
+    if not t.get("verification_date") and t.get("calibration_date"):
+        t["verification_date"] = t["calibration_date"]
+    # Compute valid_until from verification_date + verification_cycle_days
+    cycle = t.get("verification_cycle_days") or 180
+    if t.get("verification_date"):
+        try:
+            vd = datetime.strptime(t["verification_date"], "%Y-%m-%d")
+            t["valid_until"] = (vd + timedelta(days=cycle)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    t["is_valid"] = (t.get("valid_until") or "") >= today
+    days_left = (datetime.strptime(t["valid_until"], "%Y-%m-%d") - datetime.now()).days if t.get("valid_until") else 0
+    t["days_until_expiry"] = max(0, days_left)
+    t["validity_status"] = "valid" if days_left > 30 else ("expiring_soon" if days_left > 0 else "expired")
+    # Ensure tool_id_display
+    if not t.get("tool_id_display") and t.get("id"):
+        t["tool_id_display"] = f"TID{t['id']:03d}"
+    return t
+
 @app.get("/api/tools")
 async def get_tools(category: str = ""):
     async with get_db() as db:
@@ -1605,13 +1685,8 @@ async def get_tools(category: str = ""):
                 "SELECT * FROM tools WHERE is_active = 1 AND category = ?", (category,))
         else:
             results = await execute_all(db, "SELECT * FROM tools WHERE is_active = 1")
-        # Add computed validity status
-        today = datetime.now().strftime("%Y-%m-%d")
         for t in results:
-            t["is_valid"] = t.get("valid_until", "") >= today
-            days_left = (datetime.strptime(t["valid_until"], "%Y-%m-%d") - datetime.now()).days if t.get("valid_until") else 0
-            t["days_until_expiry"] = max(0, days_left)
-            t["validity_status"] = "valid" if days_left > 30 else ("expiring_soon" if days_left > 0 else "expired")
+            _enrich_tool(t)
         return results
 
 
@@ -1772,22 +1847,41 @@ async def update_station_calibration(station_id: int, unit: str, data: dict):
 # -- Work Jobs --
 
 @app.get("/api/work-jobs")
-async def get_work_jobs(work_order_id: int = 0, station_id: int = 0, status: str = ""):
+async def get_work_jobs(
+    work_order_id: int = 0, station_id: int = 0, status: str = "",
+    customer_id: int = 0, from_date: str = "", to_date: str = "",
+    search: str = "",
+):
     async with get_db() as db:
-        base = "SELECT * FROM work_jobs"
+        base = """SELECT wj.* FROM work_jobs wj
+                  LEFT JOIN work_orders wo ON wj.work_order_id = wo.id"""
         conditions = []
         params = []
         if work_order_id:
-            conditions.append("work_order_id = ?")
+            conditions.append("wj.work_order_id = ?")
             params.append(work_order_id)
         if station_id:
-            conditions.append("station_id = ?")
+            conditions.append("wj.station_id = ?")
             params.append(station_id)
         if status:
-            conditions.append("status = ?")
+            conditions.append("wj.status = ?")
             params.append(status)
+        if customer_id:
+            conditions.append("wo.customer_id = ?")
+            params.append(customer_id)
+        if from_date:
+            conditions.append("wj.started_at >= ?")
+            params.append(from_date)
+        if to_date:
+            conditions.append("wj.started_at <= ?")
+            params.append(to_date + "T23:59:59")
+        if search:
+            q = f"%{search}%"
+            conditions.append("(wj.work_order_number LIKE ? OR wj.battery_serial LIKE ?)")
+            params.extend([q, q])
         if conditions:
             base += " WHERE " + " AND ".join(conditions)
+        base += " ORDER BY wj.id DESC"
         jobs = await execute_all(db, base, params)
         for j in jobs:
             tasks = await execute_all(db,
@@ -2420,31 +2514,50 @@ async def generate_report(job_id: int):
 
 # -- Admin --
 
+def _read_cpu_temp():
+    """Read CPU temperature from thermal zone (Raspberry Pi / Linux)."""
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return round(int(f.read().strip()) / 1000, 1)
+    except Exception:
+        return None
+
+def _build_system_info():
+    import sys
+    info = {
+        "version": "2.0.0-mock",
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "python": sys.version.split()[0],
+        "stations": 12,
+    }
+    if psutil:
+        info["cpu_percent"] = psutil.cpu_percent(interval=0.1)
+        mem = psutil.virtual_memory()
+        info["memory_used_mb"] = round(mem.used / (1024 * 1024))
+        info["memory_total_mb"] = round(mem.total / (1024 * 1024))
+        info["memory_percent"] = mem.percent
+        disk = psutil.disk_usage("/")
+        info["disk_free_gb"] = round(disk.free / (1024 ** 3), 1)
+        info["disk_total_gb"] = round(disk.total / (1024 ** 3), 1)
+        info["disk_percent"] = disk.percent
+        info["uptime_s"] = int(time.time() - psutil.boot_time())
+    else:
+        info["uptime_s"] = 3600
+    cpu_temp = _read_cpu_temp()
+    if cpu_temp is not None:
+        info["cpu_temp_c"] = cpu_temp
+    return info
+
 @app.get("/api/admin/system/info")
 async def system_info():
-    return {
-        "version": "2.0.0-mock",
-        "mode": "UI/UX Testing (Mock Backend)",
-        "stations": 12,
-        "uptime_s": 3600,
-        "platform": "Linux",
-        "python": "3.11",
-        "hardware_connected": False,
-        "i2c_bus": "MOCK",
-        "psu_count": 0,
-        "load_count": 0,
-        "features": [
-            "procedure_resolution",
-            "job_tasks",
-            "tool_validation",
-            "test_reports",
-            "task_awaiting_input",
-        ],
-    }
+    return _build_system_info()
 
+@app.get("/api/system/info")
+async def system_info_alias():
+    return _build_system_info()
 
-@app.get("/api/admin/system/health")
-async def system_health():
+def _build_health():
     return {
         "status": "healthy",
         "mode": "mock",
@@ -2456,6 +2569,14 @@ async def system_health():
         "websocket_clients": len(_ws_clients),
     }
 
+@app.get("/api/admin/system/health")
+async def system_health():
+    return _build_health()
+
+@app.get("/api/system/health")
+async def system_health_alias():
+    return _build_health()
+
 
 # =============================================================================
 # Serve Frontend Build (production)
@@ -2465,7 +2586,21 @@ from pathlib import Path as _Path
 
 _frontend_build = _Path(__file__).parent.parent / "frontend" / "build"
 if _frontend_build.exists():
-    app.mount("/", StaticFiles(directory=str(_frontend_build), html=True), name="static")
+    from fastapi.responses import FileResponse as _FileResponse
+
+    # Serve static assets (JS, CSS, images) from build/assets/
+    app.mount("/assets", StaticFiles(directory=str(_frontend_build / "assets")), name="static-assets")
+
+    # SPA catch-all: serve static files at root level, or index.html for client routes
+    @app.get("/{full_path:path}")
+    async def _spa_fallback(full_path: str):
+        """Serve root-level static files or SPA index.html for client-side routing."""
+        # Try to serve a static file first
+        file_path = _frontend_build / full_path
+        if full_path and file_path.exists() and file_path.is_file():
+            return _FileResponse(str(file_path))
+        # Fall back to index.html for SPA routing
+        return _FileResponse(str(_frontend_build / "index.html"))
 
 
 # =============================================================================

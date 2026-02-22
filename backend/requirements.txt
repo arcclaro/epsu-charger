@@ -13,6 +13,7 @@ websockets>=12.0
 pydantic>=2.10.0
 pydantic-settings>=2.5.0
 aiosqlite>=0.20.0
+psutil>=5.9.0
 
 # === Production (required for main.py with real hardware) ===
 # smbus2>=0.4.3           # I2C Communication (RPi only)

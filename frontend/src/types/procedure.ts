@@ -40,6 +40,11 @@ export interface ResolvedProcedure {
   sections: ProcedureSection[];
 }
 
+export interface TechPubApplicabilityEntry {
+  part_number: string;
+  service_type: string;
+}
+
 export interface TechPub {
   id: number;
   cmm_number: string;
@@ -49,6 +54,8 @@ export interface TechPub {
   applicable_part_numbers: string[];
   ata_chapter?: string;
   issued_by?: string;
+  manufacturer?: string;
+  applicability?: TechPubApplicabilityEntry[];
   notes?: string;
   is_active: boolean;
   created_at: string;

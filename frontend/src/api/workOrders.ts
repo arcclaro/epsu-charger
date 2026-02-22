@@ -4,11 +4,13 @@ import type { WorkOrder, WorkOrderIntake } from '@/types';
 export function getWorkOrders(params?: {
   status?: string;
   search?: string;
+  customer_id?: number;
   limit?: number;
 }): Promise<WorkOrder[]> {
   const qs = new URLSearchParams();
   if (params?.status) qs.set('status', params.status);
   if (params?.search) qs.set('search', params.search);
+  if (params?.customer_id) qs.set('customer_id', String(params.customer_id));
   if (params?.limit) qs.set('limit', String(params.limit));
   const s = qs.toString();
   return get(`/work-orders${s ? `?${s}` : ''}`);

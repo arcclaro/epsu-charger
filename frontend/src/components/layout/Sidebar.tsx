@@ -2,11 +2,6 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard,
   ClipboardList,
-  Users,
-  Battery,
-  BookOpen,
-  FlaskConical,
-  Wrench,
   Settings,
   Activity,
 } from 'lucide-react';
@@ -21,18 +16,8 @@ const navGroups = [
     ],
   },
   {
-    label: 'Data',
-    items: [
-      { to: '/customers', icon: Users, label: 'Customers' },
-      { to: '/battery-profiles', icon: Battery, label: 'Battery Profiles' },
-      { to: '/tech-pubs', icon: BookOpen, label: 'Tech Pubs' },
-      { to: '/recipes', icon: FlaskConical, label: 'Recipes' },
-    ],
-  },
-  {
     label: 'System',
     items: [
-      { to: '/calibration', icon: Wrench, label: 'Calibration' },
       { to: '/sessions', icon: Activity, label: 'Sessions' },
       { to: '/admin', icon: Settings, label: 'Admin' },
     ],

@@ -7,27 +7,29 @@ import { FormDialog } from './FormDialog';
 import { FormField } from './FormField';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Badge } from '@/components/ui/badge';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Label } from '@/components/ui/label';
 
 const emptyTool = {
   part_number: '',
   serial_number: '',
-  description: '',
   manufacturer: '',
-  category: '',
-  calibration_date: '',
-  valid_until: '',
-  calibrated_by: '',
-  calibration_certificate: '',
-  internal_reference: '',
+  tool_id_display: '',
+  verification_date: '',
+  verification_cycle_days: '180',
+  tcp_ip_address: '',
+  designated_station: '',
 };
 
 const columns: Column<Tool>[] = [
-  { header: 'Part Number', accessor: 'part_number' },
+  { header: 'TID', accessor: 'tool_id_display' },
+  { header: 'Manufacturer', accessor: 'manufacturer' },
+  { header: 'Model', accessor: 'part_number' },
   { header: 'Serial', accessor: 'serial_number', className: 'font-mono text-xs' },
-  { header: 'Description', accessor: 'description' },
-  { header: 'Category', accessor: 'category' },
+  { header: 'Station', accessor: (t) => (t.designated_station != null ? String(t.designated_station) : '-') },
+  { header: 'IP', accessor: 'tcp_ip_address', className: 'font-mono text-xs' },
   {
-    header: 'Cal Valid',
+    header: 'Verification Valid',
     accessor: (t) =>
       t.valid_until ? (
         <Badge
@@ -44,6 +46,8 @@ const columns: Column<Tool>[] = [
   },
 ];
 
+const stationOptions = Array.from({ length: 12 }, (_, i) => i + 1);
+
 export function AdminTools() {
   const [search, setSearch] = useState('');
   const { data, isLoading, error, refetch } = useApiQuery(() => getTools(), []);
@@ -59,7 +63,8 @@ export function AdminTools() {
       !search ||
       t.part_number.toLowerCase().includes(search.toLowerCase()) ||
       t.serial_number.toLowerCase().includes(search.toLowerCase()) ||
-      (t.description ?? '').toLowerCase().includes(search.toLowerCase())
+      (t.manufacturer ?? '').toLowerCase().includes(search.toLowerCase()) ||
+      (t.tool_id_display ?? '').toLowerCase().includes(search.toLowerCase())
   );
 
   const openCreate = useCallback(() => {
@@ -73,14 +78,12 @@ export function AdminTools() {
     setForm({
       part_number: tool.part_number,
       serial_number: tool.serial_number,
-      description: tool.description ?? '',
       manufacturer: tool.manufacturer ?? '',
-      category: tool.category ?? '',
-      calibration_date: tool.calibration_date ?? '',
-      valid_until: tool.valid_until ?? '',
-      calibrated_by: tool.calibrated_by ?? '',
-      calibration_certificate: tool.calibration_certificate ?? '',
-      internal_reference: tool.internal_reference ?? '',
+      tool_id_display: tool.tool_id_display ?? '',
+      verification_date: tool.verification_date ?? '',
+      verification_cycle_days: tool.verification_cycle_days != null ? String(tool.verification_cycle_days) : '180',
+      tcp_ip_address: tool.tcp_ip_address ?? '',
+      designated_station: tool.designated_station != null ? String(tool.designated_station) : '',
     });
     setFormOpen(true);
   }, []);
@@ -92,10 +95,21 @@ export function AdminTools() {
   const handleSave = useCallback(async () => {
     setSaving(true);
     try {
+      const payload: Record<string, unknown> = {
+        part_number: form.part_number,
+        serial_number: form.serial_number,
+        manufacturer: form.manufacturer,
+        tool_id_display: form.tool_id_display,
+        verification_date: form.verification_date || null,
+        verification_cycle_days: form.verification_cycle_days ? Number(form.verification_cycle_days) : null,
+        tcp_ip_address: form.tcp_ip_address || null,
+        designated_station: form.designated_station ? Number(form.designated_station) : null,
+      };
+
       if (editing) {
-        await updateTool(editing.id, form);
+        await updateTool(editing.id, payload);
       } else {
-        await createTool(form);
+        await createTool(payload);
       }
       setFormOpen(false);
       refetch();
@@ -123,7 +137,7 @@ export function AdminTools() {
   return (
     <>
       <AdminCrudTable
-        title="Calibrated Tools"
+        title="Station Equipment"
         data={filtered ?? null}
         columns={columns}
         isLoading={isLoading}
@@ -133,27 +147,42 @@ export function AdminTools() {
         onDelete={setDeleting}
         searchValue={search}
         onSearchChange={setSearch}
-        searchPlaceholder="Search tools..."
+        searchPlaceholder="Search equipment..."
       />
 
       <FormDialog
         open={formOpen}
         onClose={() => setFormOpen(false)}
         onSubmit={handleSave}
-        title={editing ? 'Edit Tool' : 'New Tool'}
+        title={editing ? 'Edit Equipment' : 'New Equipment'}
         loading={saving}
       >
         <div className="grid grid-cols-2 gap-3">
-          <FormField label="Part Number" name="part_number" value={form.part_number} onChange={onChange} required />
-          <FormField label="Serial Number" name="serial_number" value={form.serial_number} onChange={onChange} required />
-          <FormField label="Description" name="description" value={form.description} onChange={onChange} className="col-span-2" />
           <FormField label="Manufacturer" name="manufacturer" value={form.manufacturer} onChange={onChange} />
-          <FormField label="Category" name="category" value={form.category} onChange={onChange} />
-          <FormField label="Calibration Date" name="calibration_date" value={form.calibration_date} onChange={onChange} type="date" />
-          <FormField label="Valid Until" name="valid_until" value={form.valid_until} onChange={onChange} type="date" />
-          <FormField label="Calibrated By" name="calibrated_by" value={form.calibrated_by} onChange={onChange} />
-          <FormField label="Certificate" name="calibration_certificate" value={form.calibration_certificate} onChange={onChange} />
-          <FormField label="Internal Reference" name="internal_reference" value={form.internal_reference} onChange={onChange} className="col-span-2" />
+          <FormField label="Part Number / Model" name="part_number" value={form.part_number} onChange={onChange} required />
+          <FormField label="Serial Number" name="serial_number" value={form.serial_number} onChange={onChange} required />
+          <FormField label="TID Reference" name="tool_id_display" value={form.tool_id_display} onChange={onChange} placeholder="TIDxxx" />
+          <FormField label="Verification Date" name="verification_date" value={form.verification_date} onChange={onChange} type="date" />
+          <FormField label="Verification Cycle (days)" name="verification_cycle_days" value={form.verification_cycle_days} onChange={onChange} type="number" />
+          <FormField label="TCP/IP Address" name="tcp_ip_address" value={form.tcp_ip_address} onChange={onChange} placeholder="192.168.x.x" />
+          <div className="space-y-1">
+            <Label>Designated Station</Label>
+            <Select
+              value={form.designated_station}
+              onValueChange={(value) => onChange('designated_station', value)}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select station" />
+              </SelectTrigger>
+              <SelectContent>
+                {stationOptions.map((n) => (
+                  <SelectItem key={n} value={String(n)}>
+                    Station {n}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
       </FormDialog>
 
@@ -161,8 +190,8 @@ export function AdminTools() {
         open={!!deleting}
         onClose={() => setDeleting(null)}
         onConfirm={handleDelete}
-        title="Delete Tool"
-        description={`Delete tool "${deleting?.part_number} / ${deleting?.serial_number}"? This cannot be undone.`}
+        title="Delete Equipment"
+        description={`Delete "${deleting?.tool_id_display || deleting?.part_number} / ${deleting?.serial_number}"? This cannot be undone.`}
         loading={deleteLoading}
       />
     </>

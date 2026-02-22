@@ -1,18 +1,96 @@
+import { useState } from 'react';
 import { PageHeader } from '@/components/common/PageHeader';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { useApiQuery } from '@/hooks/useApiQuery';
 import { getWorkJobs } from '@/api/workJobs';
+import { getCustomers } from '@/api/customers';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Link } from 'react-router-dom';
+import { Search } from 'lucide-react';
 
 export default function Sessions() {
-  const { data, isLoading, error } = useApiQuery(() => getWorkJobs(), []);
+  const [search, setSearch] = useState('');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+  const [customerId, setCustomerId] = useState<string>('');
+
+  const { data: customers } = useApiQuery(() => getCustomers(), []);
+
+  const { data, isLoading, error } = useApiQuery(
+    () =>
+      getWorkJobs({
+        search: search || undefined,
+        from_date: fromDate || undefined,
+        to_date: toDate || undefined,
+        customer_id: customerId ? Number(customerId) : undefined,
+      }),
+    [search, fromDate, toDate, customerId],
+  );
 
   return (
     <div>
       <PageHeader title="Sessions" description="Work job sessions (legacy view)" />
+
+      <Card className="mb-4 p-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="space-y-1">
+            <Label htmlFor="search" className="text-xs text-muted-foreground">Work Order</Label>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                id="search"
+                placeholder="Search work orders..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                className="pl-9"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <Label htmlFor="from-date" className="text-xs text-muted-foreground">Date From</Label>
+            <Input
+              id="from-date"
+              type="date"
+              value={fromDate}
+              onChange={e => setFromDate(e.target.value)}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <Label htmlFor="to-date" className="text-xs text-muted-foreground">Date To</Label>
+            <Input
+              id="to-date"
+              type="date"
+              value={toDate}
+              onChange={e => setToDate(e.target.value)}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <Label htmlFor="customer" className="text-xs text-muted-foreground">Customer</Label>
+            <Select value={customerId} onValueChange={setCustomerId}>
+              <SelectTrigger id="customer">
+                <SelectValue placeholder="All customers" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">All customers</SelectItem>
+                {customers?.map(c => (
+                  <SelectItem key={c.id} value={String(c.id)}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      </Card>
+
       {isLoading ? <LoadingSpinner /> : error ? (
         <p className="text-red-600">Failed to load sessions</p>
       ) : (

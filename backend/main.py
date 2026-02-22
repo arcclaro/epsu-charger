@@ -23,6 +23,7 @@ from config import settings, init_directories
 from api import stations, recipes, sessions, reports, admin, ws
 from api import work_orders, customers, battery_profiles
 from api import procedures, job_tasks
+from api import tech_pubs, tools as tools_api, work_jobs, station_calibration
 from services import i2c_poller, station_manager, data_logger
 
 # Configure logging
@@ -114,6 +115,21 @@ app.include_router(customers.router, prefix="/api", tags=["Customers"])
 app.include_router(battery_profiles.router, prefix="/api", tags=["Battery Profiles"])
 app.include_router(procedures.router, prefix="/api", tags=["Procedures"])
 app.include_router(job_tasks.router, prefix="/api", tags=["Job Tasks"])
+app.include_router(tech_pubs.router, prefix="/api", tags=["Tech Pubs"])
+app.include_router(tools_api.router, prefix="/api", tags=["Tools"])
+app.include_router(work_jobs.router, prefix="/api", tags=["Work Jobs"])
+app.include_router(station_calibration.router, prefix="/api", tags=["Station Calibration"])
+
+# System route aliases — frontend calls /api/system/* not /api/admin/system/*
+@app.get("/api/system/info")
+async def system_info_alias():
+    return await admin.system_info()
+
+
+@app.get("/api/system/health")
+async def system_health_alias():
+    return await admin.system_health()
+
 
 # Serve static files (React build)
 frontend_build = Path(__file__).parent.parent / "frontend" / "build"

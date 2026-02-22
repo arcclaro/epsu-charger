@@ -24,3 +24,10 @@ export function updateTechPub(id: number, data: Partial<TechPub>): Promise<TechP
 export function deleteTechPub(id: number): Promise<{ status: string }> {
   return del(`/tech-pubs/${id}`);
 }
+
+export function bulkReplaceApplicability(
+  techPubId: number,
+  entries: { part_number: string; service_type: string }[],
+): Promise<unknown> {
+  return put(`/tech-pubs/${techPubId}/applicability`, { entries });
+}
