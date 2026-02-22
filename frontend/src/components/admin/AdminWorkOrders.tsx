@@ -204,7 +204,7 @@ export function AdminWorkOrders() {
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1.5">
             <Label className="text-xs font-medium">
-              Customer<span className="text-red-400 ml-0.5">*</span>
+              Customer<span className="text-red-600 ml-0.5">*</span>
             </Label>
             <Select value={form.customer_id} onValueChange={(v) => onChange('customer_id', v)}>
               <SelectTrigger className="h-8 text-sm w-full">

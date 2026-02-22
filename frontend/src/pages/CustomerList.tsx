@@ -21,7 +21,7 @@ export default function CustomerList() {
         <Input placeholder="Search customers..." value={search} onChange={e => setSearch(e.target.value)} className="pl-9" />
       </div>
       {isLoading ? <LoadingSpinner /> : error ? (
-        <p className="text-red-400">Failed to load customers</p>
+        <p className="text-red-600">Failed to load customers</p>
       ) : (
         <Card>
           <Table>
@@ -38,7 +38,7 @@ export default function CustomerList() {
               {data?.map(c => (
                 <TableRow key={c.id}>
                   <TableCell>
-                    <Link to={`/customers/${c.id}`} className="text-blue-400 hover:underline font-mono">{c.customer_code}</Link>
+                    <Link to={`/customers/${c.id}`} className="text-blue-600 hover:underline font-mono">{c.customer_code}</Link>
                   </TableCell>
                   <TableCell className="font-medium">{c.name}</TableCell>
                   <TableCell className="text-muted-foreground">{c.contact_person || '-'}</TableCell>

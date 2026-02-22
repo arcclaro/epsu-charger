@@ -39,7 +39,7 @@ export default function WorkOrderList() {
         />
       </div>
       {isLoading ? <LoadingSpinner /> : error ? (
-        <p className="text-red-400">Failed to load work orders</p>
+        <p className="text-red-600">Failed to load work orders</p>
       ) : (
         <Card>
           <Table>
@@ -58,7 +58,7 @@ export default function WorkOrderList() {
               {data?.map(wo => (
                 <TableRow key={wo.id} className="cursor-pointer hover:bg-accent/50">
                   <TableCell>
-                    <Link to={`/work-orders/${wo.id}`} className="text-blue-400 hover:underline font-medium">
+                    <Link to={`/work-orders/${wo.id}`} className="text-blue-600 hover:underline font-medium">
                       {wo.work_order_number}
                     </Link>
                   </TableCell>

@@ -82,7 +82,7 @@ export function AdminCrudTable<T extends { id: number }>({
       {isLoading ? (
         <LoadingSpinner />
       ) : error ? (
-        <p className="text-red-400 text-sm">Failed to load {title.toLowerCase()}</p>
+        <p className="text-red-600 text-sm">Failed to load {title.toLowerCase()}</p>
       ) : (
         <Card>
           <Table>

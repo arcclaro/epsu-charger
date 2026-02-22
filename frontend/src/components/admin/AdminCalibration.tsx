@@ -93,7 +93,7 @@ export function AdminCalibration() {
   }, []);
 
   if (isLoading) return <LoadingSpinner />;
-  if (error) return <p className="text-red-400 text-sm">Failed to load calibration data</p>;
+  if (error) return <p className="text-red-600 text-sm">Failed to load calibration data</p>;
 
   return (
     <>
